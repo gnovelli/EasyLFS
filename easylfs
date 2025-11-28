@@ -1,0 +1,147 @@
+#!/bin/bash
+# EasyLFS - Unified command interface
+# Usage: ./easylfs [command]
+
+set -e
+
+# Color codes
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Auto-setup if needed
+auto_setup() {
+    if ! docker volume inspect easylfs_lfs-sources &> /dev/null; then
+        echo -e "${YELLOW}First run detected. Initializing environment...${NC}"
+        ./setup.sh
+    fi
+}
+
+# Command dispatcher
+case "${1:-help}" in
+    help|--help|-h)
+        echo -e "${BLUE}EasyLFS - Easy Linux From Scratch${NC}"
+        echo ""
+        echo "Usage: ./easylfs [command]"
+        echo ""
+        echo -e "${YELLOW}Commands:${NC}"
+        echo "  build           - Build complete LFS system (6-12 hours)"
+        echo "  setup           - Initialize environment (run this first)"
+        echo "  status          - Show build progress and volume status"
+        echo "  logs            - Display build logs"
+        echo "  clean           - Remove containers (keep volumes)"
+        echo "  reset           - Complete reset (removes all volumes)"
+        echo "  export          - Export final disk image to current directory"
+        echo "  shell           - Open shell in LFS rootfs volume"
+        echo "  test            - Run validation tests"
+        echo ""
+        echo -e "${YELLOW}Stage-specific builds:${NC}"
+        echo "  download        - Download sources only"
+        echo "  toolchain       - Build toolchain only"
+        echo "  basesystem      - Build base system only"
+        echo "  configure       - Configure system only"
+        echo "  kernel          - Build kernel only"
+        echo "  package         - Create disk image only"
+        echo ""
+        echo -e "${YELLOW}Quick start:${NC}"
+        echo "  ./easylfs build    # Automatically runs setup if needed"
+        echo ""
+        ;;
+
+    build)
+        auto_setup
+        ./build.sh
+        ;;
+
+    setup)
+        ./setup.sh
+        ;;
+
+    status)
+        auto_setup
+        make status
+        ;;
+
+    logs)
+        auto_setup
+        make logs
+        ;;
+
+    clean)
+        docker compose down
+        echo -e "${GREEN}Containers removed. Volumes preserved.${NC}"
+        ;;
+
+    reset)
+        echo -e "${RED}WARNING: This will delete ALL build artifacts!${NC}"
+        read -p "Are you sure? Type 'yes' to confirm: " confirm
+        if [ "$confirm" = "yes" ]; then
+            docker compose down -v 2>/dev/null || true
+            for vol in easylfs_lfs-sources easylfs_lfs-tools easylfs_lfs-rootfs easylfs_lfs-dist easylfs_lfs-logs; do
+                docker volume rm "$vol" 2>/dev/null || true
+            done
+            echo -e "${GREEN}Complete reset done.${NC}"
+        else
+            echo "Reset cancelled."
+        fi
+        ;;
+
+    export)
+        auto_setup
+        echo -e "${YELLOW}Exporting disk image...${NC}"
+        docker run --rm -v easylfs_lfs-dist:/dist -v "$(pwd)":/output alpine \
+            cp /dist/lfs-12.4-sysv.img /output/ 2>/dev/null || {
+            echo -e "${RED}No image found. Build the system first with: ./easylfs build${NC}"
+            exit 1
+        }
+        echo -e "${GREEN}Image exported: $(pwd)/lfs-12.4-sysv.img${NC}"
+        ls -lh lfs-12.4-sysv.img
+        echo ""
+        echo "To boot with QEMU:"
+        echo "  qemu-system-x86_64 -m 2G -hda lfs-12.4-sysv.img"
+        ;;
+
+    shell)
+        auto_setup
+        echo -e "${YELLOW}Opening shell in LFS rootfs...${NC}"
+        echo "Type 'exit' to return"
+        docker run --rm -it -v easylfs_lfs-rootfs:/lfs alpine sh -c 'cd /lfs && exec sh'
+        ;;
+
+    test)
+        auto_setup
+        docker compose run --rm test
+        ;;
+
+    # Individual stages
+    download|toolchain|basesystem|configure|kernel|package)
+        auto_setup
+        service_map=(
+            ["download"]="download-sources"
+            ["toolchain"]="build-toolchain"
+            ["basesystem"]="build-basesystem"
+            ["configure"]="configure-system"
+            ["kernel"]="build-kernel"
+            ["package"]="package-image"
+        )
+        declare -A service_map
+        service_map[download]="download-sources"
+        service_map[toolchain]="build-toolchain"
+        service_map[basesystem]="build-basesystem"
+        service_map[configure]="configure-system"
+        service_map[kernel]="build-kernel"
+        service_map[package]="package-image"
+
+        service="${service_map[$1]}"
+        echo -e "${YELLOW}Running stage: $service${NC}"
+        docker compose run --rm "$service"
+        ;;
+
+    *)
+        echo -e "${RED}Unknown command: $1${NC}"
+        echo "Run './easylfs help' to see available commands"
+        exit 1
+        ;;
+esac

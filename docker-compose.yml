@@ -1,0 +1,255 @@
+# EasyLFS - Easy Linux From Scratch
+# Docker Compose pipeline for building LFS 12.4 (SysVinit)
+#
+# Usage: Run services sequentially with:
+#   docker-compose run --rm <service-name>
+#
+# DO NOT use 'docker-compose up' - services must run in sequence!
+
+services:
+  # ============================================================================
+  # Service 1: Download Sources (Chapter 3)
+  # Downloads all LFS source packages and patches
+  # ============================================================================
+  download-sources:
+    build:
+      context: ./services
+      dockerfile: download-sources/Dockerfile
+    container_name: easylfs-download-sources
+    volumes:
+      - lfs-sources:/sources
+      - lfs-logs:/logs
+    environment:
+      - LFS_VERSION=12.4
+      - LFS_MIRROR=https://www.linuxfromscratch.org
+      - SERVICE_NAME=download-sources
+    restart: "no"
+
+  # ============================================================================
+  # Service 2: Build Toolchain (Chapters 5-6)
+  # Compiles the temporary cross-compilation toolchain
+  # Duration: 2-4 hours
+  # ============================================================================
+  build-toolchain:
+    build:
+      context: ./services
+      dockerfile: build-toolchain/Dockerfile
+    container_name: easylfs-build-toolchain
+    cap_add:
+      - SYS_CHROOT
+    volumes:
+      - lfs-sources:/sources:ro
+      - lfs-tools:/tools
+      - lfs-rootfs:/lfs
+      - lfs-logs:/logs
+    environment:
+      - LFS=/lfs
+      - LFS_TGT=x86_64-lfs-linux-gnu
+      - MAKEFLAGS=-j4
+      - LC_ALL=POSIX
+      - SERVICE_NAME=build-toolchain
+    restart: "no"
+    depends_on:
+      download-sources:
+        condition: service_completed_successfully
+
+  # ============================================================================
+  # Service 3: Build Base System (Chapters 7-8)
+  # Enters chroot and builds the final LFS system
+  # Duration: 3-6 hours
+  # ============================================================================
+  build-basesystem:
+    build:
+      context: ./services
+      dockerfile: build-basesystem/Dockerfile
+    container_name: easylfs-build-basesystem
+    cap_add:
+      - SYS_CHROOT
+      - SYS_ADMIN  # Required for mount operations
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - lfs-sources:/sources:ro
+      - lfs-tools:/tools:ro
+      - lfs-rootfs:/lfs
+      - lfs-logs:/logs
+    environment:
+      - LFS=/lfs
+      - MAKEFLAGS=-j4
+      - LC_ALL=POSIX
+      - SERVICE_NAME=build-basesystem
+    restart: "no"
+    depends_on:
+      build-toolchain:
+        condition: service_completed_successfully
+
+  # ============================================================================
+  # Service 4: Configure System (Chapter 9)
+  # Creates system configuration files
+  # Duration: 10-20 minutes
+  # ============================================================================
+  configure-system:
+    build:
+      context: ./services
+      dockerfile: configure-system/Dockerfile
+    container_name: easylfs-configure-system
+    cap_add:
+      - SYS_CHROOT
+      - SYS_ADMIN  # Required for mount operations
+    volumes:
+      - lfs-rootfs:/lfs
+      - lfs-logs:/logs
+    environment:
+      - LFS=/lfs
+      - HOSTNAME=lfs-system
+      - TIMEZONE=Europe/Rome
+      - SERVICE_NAME=configure-system
+    restart: "no"
+    depends_on:
+      build-basesystem:
+        condition: service_completed_successfully
+
+  # ============================================================================
+  # Service 5: Build Kernel (Chapter 10)
+  # Compiles the Linux kernel
+  # Duration: 20-60 minutes
+  # ============================================================================
+  build-kernel:
+    build:
+      context: ./services
+      dockerfile: build-kernel/Dockerfile
+    container_name: easylfs-build-kernel
+    volumes:
+      - lfs-sources:/sources:ro
+      - lfs-rootfs:/lfs
+      - lfs-logs:/logs
+    environment:
+      - LFS=/lfs
+      - MAKEFLAGS=-j4
+      - KERNEL_VERSION=6.12.6
+      - SERVICE_NAME=build-kernel
+    restart: "no"
+    depends_on:
+      configure-system:
+        condition: service_completed_successfully
+
+  # ============================================================================
+  # Service 6: Package Image (Chapter 11)
+  # Creates bootable disk image or ISO
+  # Duration: 15-30 minutes
+  # ============================================================================
+  package-image:
+    build:
+      context: ./services
+      dockerfile: package-image/Dockerfile
+    container_name: easylfs-package-image
+    privileged: true  # Required for loop device access
+    volumes:
+      - lfs-rootfs:/lfs:ro
+      - lfs-dist:/dist
+      - lfs-logs:/logs
+      - /dev:/dev  # Mount host /dev for loop device access
+    environment:
+      - LFS=/lfs
+      - IMAGE_NAME=lfs-12.4-sysv
+      - IMAGE_SIZE=5120  # Size in MB (5GB for final system - actual usage ~4.0GB)
+      - SERVICE_NAME=package-image
+    restart: "no"
+    depends_on:
+      build-kernel:
+        condition: service_completed_successfully
+
+  # ============================================================================
+  # Service 7: Test Suite
+  # Automated testing and validation
+  # ============================================================================
+  test:
+    build: ./tests
+    container_name: easylfs-test
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - lfs-sources:/volumes/lfs-sources:ro
+      - lfs-tools:/volumes/lfs-tools:ro
+      - lfs-rootfs:/volumes/lfs-rootfs:ro
+      - lfs-dist:/volumes/lfs-dist:ro
+      - .:/workspace:ro
+    working_dir: /tests
+    environment:
+      - COMPOSE_PROJECT_NAME=easylfs
+    restart: "no"
+
+  # ============================================================================
+  # Service 8: Web Terminal (ttyd)
+  # Browser-based terminal access to LFS system
+  # ============================================================================
+  lfs-web-terminal:
+    build:
+      context: ./services
+      dockerfile: lfs-web-terminal/Dockerfile
+    container_name: easylfs-web-terminal
+    ports:
+      - "${WEB_TERMINAL_PORT:-7681}:7681"
+    volumes:
+      - lfs-dist:/lfs-dist
+    environment:
+      - IMAGE_NAME=lfs-12.4-sysv
+      - WEB_TERMINAL_PORT=${WEB_TERMINAL_PORT:-7681}
+    restart: "no"
+
+  # ============================================================================
+  # Service 9: Web Screen (noVNC)
+  # Browser-based graphical console access to LFS system
+  # ============================================================================
+  lfs-web-screen:
+    build:
+      context: ./services
+      dockerfile: lfs-web-screen/Dockerfile
+    container_name: easylfs-web-screen
+    ports:
+      - "${WEB_SCREEN_PORT:-6080}:6080"
+    volumes:
+      - lfs-dist:/lfs-dist
+    environment:
+      - IMAGE_NAME=lfs-12.4-sysv
+      - WEB_SCREEN_PORT=${WEB_SCREEN_PORT:-6080}
+      - VNC_PORT=5900
+    restart: "no"
+
+# ==============================================================================
+# Named Volumes
+# These persist build state across ephemeral containers
+# Using external volumes to prevent Docker Compose from auto-prefixing with project name
+# ==============================================================================
+volumes:
+  # Source tarballs (populated by download-sources)
+  lfs-sources:
+    external: true
+    name: easylfs_lfs-sources
+
+  # Temporary toolchain (populated by build-toolchain)
+  lfs-tools:
+    external: true
+    name: easylfs_lfs-tools
+
+  # LFS root filesystem - the main artifact
+  lfs-rootfs:
+    external: true
+    name: easylfs_lfs-rootfs
+
+  # Final distribution artifacts (ISO/disk images)
+  lfs-dist:
+    external: true
+    name: easylfs_lfs-dist
+
+  # Build logs (one per service + master log)
+  lfs-logs:
+    external: true
+    name: easylfs_lfs-logs
+
+# ==============================================================================
+# Networks
+# Default bridge network is sufficient for this sequential pipeline
+# ==============================================================================
+networks:
+  default:
+    driver: bridge
