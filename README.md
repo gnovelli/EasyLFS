@@ -766,7 +766,7 @@ Contributions welcome! The core pipeline is production-ready. Current priorities
 
 ## License
 
-*License to be determined* - See [CREDITS.md](CREDITS.md) for attribution and third-party licenses
+MIT [LICENSE](LICENSE) - See [CREDITS.md](CREDITS.md) for attribution and third-party licenses
 
 ## Acknowledgments
 
